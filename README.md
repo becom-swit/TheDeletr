@@ -10,6 +10,17 @@ dotnet test thedeletr.slnx
 dotnet publish src\Thedeletr -c Release -o publish
 ```
 
+Local builds report version `0.0.0-local`.
+
+## CI / Releases
+
+`.github/workflows/ci.yml`:
+
+- **Pull request to `main`** → build and run tests (Windows).
+- **Push to `main`** → tests, version via [GitVersion](GitVersion.yml) (`FullSemVer`), self-contained single-file publish for `win-x64`, `linux-x64`, `osx-arm64`, then one GitHub release `v<FullSemVer>` with `TheDeletr-<version>-<rid>.zip/.tar.gz` and `SHA256SUMS.txt`.
+
+The `FullSemVer` is used for `--version`, the logo and the file version info.
+
 ## Usage
 
 ```

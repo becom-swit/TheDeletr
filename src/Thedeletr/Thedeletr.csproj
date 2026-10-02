@@ -4,7 +4,9 @@
     <OutputType>Exe</OutputType>
     <AssemblyName>TheDeletr</AssemblyName>
     <Product>TheDeletr</Product>
-    <Version>1.0.0</Version>
+    <!-- Local builds only. CI overrides Version/AssemblyVersion/FileVersion/InformationalVersion with GitVersion values. -->
+    <Version>0.0.0-local</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOTNET_VERSION: 10.0.x
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  PROJECT: src/Thedeletr/Thedeletr.csproj
+
+jobs:
+  test:
+    name: Build & test
+    # Tests use Windows path semantics (backslash separators).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Test
+        run: dotnet test thedeletr.slnx --configuration Release --logger "trx;LogFileName=test-results.trx" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: TestResults/*.trx
+          if-no-files-found: ignore
+
+  version:
+    name: Determine version
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      fullSemVer: ${{ steps.gitversion.outputs.fullSemVer }}
+      assemblySemVer: ${{ steps.gitversion.outputs.assemblySemVer }}
+      assemblySemFileVer: ${{ steps.gitversion.outputs.assemblySemFileVer }}
+      preReleaseTag: ${{ steps.gitversion.outputs.preReleaseTag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: gittools/actions/gitversion/setup@v4
+        with:
+          versionSpec: 6.x
+
+      - id: gitversion
+        uses: gittools/actions/gitversion/execute@v4
+
+      - name: Show version
+        run: echo "::notice title=Version::${{ steps.gitversion.outputs.fullSemVer }}"
+
+  publish:
+    name: Publish ${{ matrix.rid }}
+    needs: [test, version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+          - rid: linux-x64
+            os: ubuntu-latest
+          # Built on macOS so the arm64 binary gets the ad-hoc code signature macOS requires.
+          - rid: osx-arm64
+            os: macos-latest
+    env:
+      VERSION: ${{ needs.version.outputs.fullSemVer }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Publish
+        shell: bash
+        run: >
+          dotnet publish "$PROJECT"
+          --configuration Release
+          --runtime ${{ matrix.rid }}
+          --self-contained true
+          --output publish
+          -p:PublishSingleFile=true
+          -p:EnableCompressionInSingleFile=true
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          -p:Version="$VERSION"
+          -p:InformationalVersion="$VERSION"
+          -p:AssemblyVersion="${{ needs.version.outputs.assemblySemVer }}"
+          -p:FileVersion="${{ needs.version.outputs.assemblySemFileVer }}"
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          exe=publish/TheDeletr
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          actual="$("$exe" --version | tr -d '\r')"
+          echo "--version: $actual"
+          [ "$actual" = "$VERSION" ] || { echo "::error::Expected version $VERSION, got $actual"; exit 1; }
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item README.md publish/
+          Compress-Archive -Path publish/* -DestinationPath "TheDeletr-$env:VERSION-${{ matrix.rid }}.zip"
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cp README.md publish/
+          chmod +x publish/TheDeletr
+          tar -czf "TheDeletr-$VERSION-${{ matrix.rid }}.tar.gz" -C publish .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: TheDeletr-${{ matrix.rid }}
+          path: |
+            TheDeletr-*.zip
+            TheDeletr-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [version, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.fullSemVer }}
+      PRERELEASE: ${{ needs.version.outputs.preReleaseTag != '' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: TheDeletr-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum TheDeletr-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Create release
+        run: |
+          args=()
+          [ "$PRERELEASE" = "true" ] && args+=(--prerelease)
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "TheDeletr $VERSION" \
+            --generate-notes \
+            "${args[@]}"
